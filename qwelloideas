@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Qwello • Light KG Prototype v1.3</title>
+<style>
+  :root{--bg:#0f1226;--panel:#141834;--ink:#e6e8ff;--muted:#a5a8d6;--brand:#8ea2ff;--brand2:#7ef0ff;--ok:#20d497;--warn:#ffbd4a;--bad:#ff6b6b;--edge:#364178}
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:linear-gradient(180deg,#0e1022,#0b1028 40%,#0a0f2b);color:var(--ink)}
+  #app{display:grid;height:100%;grid-template-rows:64px 1fr 44px;grid-template-columns:320px 1fr 420px;grid-template-areas:"top top top" "left center right" "bottom bottom bottom";gap:10px;padding:10px}
+  header{grid-area:top;background:linear-gradient(90deg,#141834,#10153a);border:1px solid #21265a;border-radius:14px;display:flex;align-items:center;gap:10px;padding:8px 12px}
+  header .logo{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.5px}
+  header .logo .dot{width:10px;height:10px;border-radius:50%;background:radial-gradient(circle at 30% 30%,var(--brand2),var(--brand));box-shadow:0 0 10px var(--brand2)}
+  header .q{flex:1;display:flex;gap:8px}
+  input[type="text"], textarea{background:#0e1330;border:1px solid #26306d;color:var(--ink);border-radius:12px;padding:10px}
+  input[type="text"]{width:100%}
+  button{background:linear-gradient(180deg,#2a4bea,#2233aa);border:1px solid #2335b9;color:#fff;border-radius:12px;padding:10px 14px;font-weight:600;cursor:pointer}
+  button.secondary{background:#181d43;border:1px solid #2a336d}
+  button.ghost{background:transparent;border:1px dashed #2a336d}
+  aside{background:linear-gradient(180deg,#13173a,#12163b);border:1px solid #21265a;border-radius:14px;padding:10px}
+  #left{grid-area:left}
+  #center{grid-area:center;background:radial-gradient(800px 600px at 50% 30%,rgba(142,162,255,.12),transparent 60%), linear-gradient(180deg,#0f132e,#0b0f28);border:1px solid #21265a;border-radius:14px;position:relative;overflow:hidden}
+  #right{grid-area:right}
+  #bottom{grid-area:bottom;background:linear-gradient(90deg,#141834,#10153a);border:1px solid #21265a;border-radius:14px;display:flex;align-items:center;gap:8px;padding:6px}
+  h3{margin:8px 0 6px 0;font-size:13px;text-transform:uppercase;letter-spacing:.12em;color:#c8ccff}
+  .panel{background:var(--panel);border:1px solid #21265a;border-radius:12px;padding:10px;margin-bottom:10px}
+  .hint{font-size:12px;color:var(--muted)}
+  .row{display:flex;gap:8px;align-items:center}
+  .list{display:grid;gap:8px}
+  .item{padding:8px;border:1px solid #262d61;border-radius:10px;background:#121641}
+  .tiny{font-size:11px;color:var(--muted)}
+  .right-tabs{display:flex;gap:6px;margin-bottom:8px}
+  .right-tabs button{flex:1}
+  .tabpage{display:none}
+  .tabpage.active{display:block}
+  #graph{position:absolute;inset:0}
+  #graph svg{width:100%;height:100%}
+  .node text{font-size:12px;fill:#eaf0ff;paint-order:stroke;stroke:#0b0f28;stroke-width:3px;stroke-linejoin:round}
+  .edge{stroke:var(--edge);stroke-width:1.2;opacity:.7}
+  .edge.strong{stroke-width:2.5}
+  .edge.conflict{stroke:var(--bad);stroke-dasharray:3 2}
+  .legend{position:absolute;top:8px;right:8px;background:#0d1232cc;border:1px solid #222a65;border-radius:10px;padding:6px 8px;font-size:12px}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  .legend .topic{background:#8ea2ff}
+  .legend .entity{background:#7ef0ff}
+  .legend .claim{background:#20d497}
+  .legend .source{background:#ffbd4a}
+  details{border:1px solid #2a336d;border-radius:10px;background:#121641;padding:10px}
+  details[open]{background:#0f153e}
+  summary{cursor:pointer;font-weight:600}
+  code, pre{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace}
+  .srcRow{display:flex;justify-content:space-between;gap:8px;align-items:center}
+  .xbtn{background:#261a2a;border:1px solid #4a2a4a;border-radius:8px;padding:6px 8px;font-size:12px;cursor:pointer}
+  #toast{position:fixed;right:10px;bottom:10px;background:#111539;border:1px solid #27306a;border-radius:10px;padding:10px 12px;font-size:12px;color:#dfe4ff;min-width:220px;display:none;z-index:50}
+  #log{height:140px;width:100%;white-space:pre-wrap;background:#0e1330;border:1px solid #27306a;border-radius:10px;padding:8px;color:#cfe1ff;overflow:auto}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="logo"><span class="dot"></span> Qwello KG Lab • Light v1.3</div>
+    <div class="q">
+      <input id="question" type="text" placeholder="Ask about the loaded documents" />
+      <button id="askBtn" title="Analyze and build graph">Ask</button>
+      <button class="secondary" id="genReportBtn" title="Generate report">Report</button>
+      <button class="ghost" id="exportBtn" title="Download KG JSON">Export</button>
+      <button class="ghost" id="sampleBtn" title="Load sample text">Load sample</button>
+    </div>
+    <div class="row" style="min-width:220px;justify-content:flex-end">
+      <span class="tiny">Confidence</span>
+      <div style="height:8px;width:120px;border:1px solid #2b3371;border-radius:12px;overflow:hidden;background:#12163b"><i id="confFill" style="display:block;height:100%;width:0%;background:linear-gradient(90deg,#7ef0ff,#8ea2ff)"></i></div>
+      <span id="confLabel" class="tiny">0.00</span>
+    </div>
+  </header>
+
+  <aside id="left">
+    <h3>Sources</h3>
+    <div class="panel">
+      <div class="row" style="gap:6px;flex-wrap:wrap">
+        <input type="file" id="filePicker" multiple accept=".txt,.md,.json,.pdf" />
+        <button class="secondary" id="pasteBtn">Paste Text</button>
+        <button class="ghost" id="clearAllBtn" title="Remove all sources">Clear All</button>
+      </div>
+      <div class="hint">PDF uses a light extractor and keeps page numbers. If a PDF is image only, text will be empty.</div>
+    </div>
+
+    <div class="panel" id="sourcesPanel">
+      <h3 style="margin-top:0">Loaded</h3>
+      <div id="sourcesList"></div>
+    </div>
+    <div class="panel">
+      <h3 style="margin-top:0">PDF parse summary</h3>
+      <div id="pdfLog" class="tiny">No PDF parsed yet.</div>
+    </div>
+
+    <details>
+      <summary>Paste model output to render</summary>
+      <textarea id="pasteBlocks" rows="8" style="width:100%" placeholder="Paste response with ```KG_JSON``` and ```REPORT_MD``` blocks"></textarea>
+      <div class="row" style="margin-top:8px"><button id="parseBlocks" class="secondary">Parse & Render</button><span id="parseMsg" class="tiny"></span></div>
+    </details>
+  </aside>
+
+  <main id="center">
+    <div id="graph"></div>
+    <div class="legend">
+      <div><i class="topic"></i> Topic</div>
+      <div><i class="entity"></i> Entity</div>
+      <div><i class="claim"></i> Claim</div>
+      <div><i class="source"></i> Source</div>
+    </div>
+  </main>
+
+  <aside id="right">
+    <h3>Insights</h3>
+    <div class="right-tabs">
+      <button class="secondary" data-tab="findings">Findings</button>
+      <button class="secondary" data-tab="evidence">Evidence</button>
+      <button class="secondary" data-tab="sources">Sources</button>
+      <button class="secondary" data-tab="diag">Diag</button>
+    </div>
+    <div id="tab-findings" class="tabpage active">
+      <div class="panel" id="answerPanel">
+        <div><strong>Answer</strong></div>
+        <div id="answerText" style="margin-top:6px">Upload a PDF or paste text, then Ask.</div>
+      </div>
+      <div class="panel" id="findingsList"></div>
+    </div>
+    <div id="tab-evidence" class="tabpage">
+      <div class="panel" id="evidenceList"></div>
+    </div>
+    <div id="tab-sources" class="tabpage">
+      <div class="panel" id="sourcesListRight"></div>
+    </div>
+    <div id="tab-diag" class="tabpage">
+      <div class="panel">
+        <div class="row"><strong>Event log</strong><button class="ghost" id="clearLog">Clear</button></div>
+        <div id="log">No events yet.</div>
+      </div>
+      <div class="panel" id="diagPanel"><div class="tiny">No diagnostics yet.</div></div>
+    </div>
+  </aside>
+
+  <footer id="bottom">
+    <label class="tiny">Min edge weight</label>
+    <input type="range" id="minWeight" min="0" max="1" step="0.05" value="0" />
+    <label class="tiny" style="margin-left:8px">Live layout</label>
+    <input type="checkbox" id="physicsToggle" checked />
+    <div class="tiny" style="margin-left:auto">Drag nodes. Shift+drag to pin.</div>
+  </footer>
+</div>
+<div id="toast"></div>
+<script>
+const UI={q:id('question'),askBtn:id('askBtn'),genReportBtn:id('genReportBtn'),exportBtn:id('exportBtn'),filePicker:id('filePicker'),pasteBtn:id('pasteBtn'),clearAllBtn:id('clearAllBtn'),sampleBtn:id('sampleBtn'),confFill:id('confFill'),confLabel:id('confLabel'),sourcesList:id('sourcesList'),sourcesListRight:id('sourcesListRight'),tabs:qsa('[data-tab]'),tabPages:{findings:id('tab-findings'),evidence:id('tab-evidence'),sources:id('tab-sources'),diag:id('tab-diag')},answerText:id('answerText'),findingsList:id('findingsList'),evidenceList:id('evidenceList'),minWeight:id('minWeight'),physicsToggle:id('physicsToggle'),pasteBlocks:id('pasteBlocks'),parseBlocks:id('parseBlocks'),parseMsg:id('parseMsg'),pdfLog:id('pdfLog'),toast:id('toast'),diagPanel:id('diagPanel'),logBox:id('log'),clearLog:id('clearLog')}
+const state={sources:[],kg:null,layout:{nodes:new Map(),edges:[]},pinned:new Set(),counter:1}
+function id(x){return document.getElementById(x)}
+function qsa(s,el=document){return Array.from(el.querySelectorAll(s))}
+function uid(p='n'){return p+(state.counter++)}
+function clamp(x,a,b){return Math.max(a,Math.min(b,x))}
+function esc(s){return (s+'').replace(/[&<>\"]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[m]))}
+function download(filename,text){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'text/plain'}));a.download=filename;a.click()}
+function log(msg){UI.logBox.textContent='['+new Date().toLocaleTimeString()+'] '+msg+'\n'+UI.logBox.textContent}
+function toast(msg){log(msg); UI.toast.textContent=msg; UI.toast.style.display='block'; clearTimeout(window.__t); window.__t=setTimeout(()=>UI.toast.style.display='none',2200)}
+
+window.addEventListener('error', e=>{log('Error: '+(e.message||e))})
+
+UI.filePicker.addEventListener('change',onPickFiles)
+UI.pasteBtn.addEventListener('click',onPasteText)
+UI.clearAllBtn.addEventListener('click',()=>{state.sources=[]; renderSources(); toast('Cleared all sources')})
+UI.sampleBtn.addEventListener('click',loadSample)
+UI.askBtn.addEventListener('click',()=>{log('Ask clicked'); analyze(UI.q.value)})
+UI.genReportBtn.addEventListener('click',()=>{log('Report clicked'); generateReport()})
+UI.exportBtn.addEventListener('click',()=>{if(!state.kg){alert('Analyze or paste output first');return} download('qwello_kg.json',JSON.stringify(state.kg,null,2))})
+UI.parseBlocks.addEventListener('click',parsePastedBlocks)
+UI.tabs.forEach(b=>b.addEventListener('click',()=>{Object.values(UI.tabPages).forEach(p=>p.classList.remove('active')); UI.tabPages[b.dataset.tab].classList.add('active')}))
+UI.minWeight.addEventListener('input',drawGraph)
+UI.physicsToggle.addEventListener('change',()=>{if(UI.physicsToggle.checked) startPhysics()})
+UI.clearLog.addEventListener('click',()=>UI.logBox.textContent='')
+
+function loadSample(){
+  const text=`Qi7 System overview\n\nQi7 is a modular intelligence stack focused on interactive research. It defines three layers: capture, synthesize, and verify. Capture collects raw artifacts. Synthesize transforms them into claims, graphs, and runnable notebooks. Verify tests claims through replication and counters. The Qi7 interface includes a lens switcher, a scratchpad, and a timeline. Limitations include sparse standards for provenance and difficulty in long-horizon reasoning. Future work proposes exemplars, shared datasets, and auditable chains.`
+  state.sources.push(parseToSource('qi7_sample.txt',text))
+  renderSources(); toast('Sample loaded')
+}
+
+async function onPickFiles(e){
+  const files=Array.from(e.target.files||[])
+  for(const f of files){
+    try{
+      if(/\.pdf$/i.test(f.name)){
+        log('PDF upload: '+f.name)
+        const t0=performance.now();
+        const pages=await extractPdfLight(f)
+        const srcId=uid('src')
+        const text=pages.map(p=>`[Page ${p.index}]\n${p.text}`).join('\n\n')
+        state.sources.push({source_id:srcId,title:f.name.replace(/\.[^.]+$/,''),filename:f.name,url:'',created_at:new Date().toISOString().slice(0,10),text,pages})
+        const chars=text.length; const dt=(performance.now()-t0).toFixed(0)
+        UI.pdfLog.innerHTML = `<div>Parsed <strong>${esc(f.name)}</strong>: ${pages.length} pages, ${chars.toLocaleString()} chars in ${dt} ms.</div>`
+        toast(`PDF parsed: ${pages.length} pages`)
+      } else {
+        const text=await f.text(); state.sources.push(parseToSource(f.name,text)); toast('Loaded '+f.name)
+      }
+    }catch(err){ log('onPickFiles error: '+(err.message||err)) }
+  }
+  renderSources()
+}
+
+function onPasteText(){
+  const text=prompt('Paste text below','')
+  if(!text) return
+  state.sources.push(parseToSource('pasted_'+(state.sources.length+1)+'.txt',text))
+  renderSources(); toast('Text added')
+}
+
+function parseToSource(filename,content){
+  try{const obj=JSON.parse(content); if(obj&&obj.text){const pages=obj.pages?.length?obj.pages:synthPages(obj.text);return {source_id:uid('src'),title:obj.title||filename.replace(/\.[^.]+$/,''),filename,url:obj.url||'',created_at:obj.created_at||new Date().toISOString().slice(0,10),text:obj.text,pages}}}catch{}
+  const pages=synthPages(content); return {source_id:uid('src'),title:filename.replace(/\.[^.]+$/,''),filename,url:'',created_at:new Date().toISOString().slice(0,10),text:content,pages}
+}
+function synthPages(text){const size=1800,overlap=180; const pages=[]; for(let i=0;i<text.length;i+=size-overlap){pages.push({index:pages.length+1,text:text.slice(i,i+size)})} return pages}
+
+async function extractPdfLight(file){
+  const buf=await file.arrayBuffer(); const bytes=new Uint8Array(buf); const str=new TextDecoder('latin1').decode(bytes)
+  const rawPages=str.split(/\n\s*\/Type\s*\/Page\b/g)
+  const pages=[]
+  for(let i=1;i<rawPages.length;i++){
+    const segment=rawPages[i]
+    const textParts=[]
+    const litRx=/\((?:\\\)|\\\(|\\\\|[^\)])*\)\s*(?:Tj|TJ)/g
+    const hexRx=/<([0-9A-Fa-f\s]+)>\s*(?:Tj|TJ)/g
+    let m
+    while((m=litRx.exec(segment))){ textParts.push(unescapePdfString(m[0])) }
+    while((m=hexRx.exec(segment))){ textParts.push(hexToString(m[1])) }
+    const pageText=cleanupPdfText(textParts.join(' '))
+    pages.push({index:i,text:pageText})
+  }
+  if(pages.length===0){
+    const textParts=[]; const litRx=/\((?:\\\)|\\\(|\\\\|[^\)])*\)\s*(?:Tj|TJ)/g; const hexRx=/<([0-9A-Fa-f\s]+)>\s*(?:Tj|TJ)/g
+    let m; while((m=litRx.exec(str))){ textParts.push(unescapePdfString(m[0])) }
+    while((m=hexRx.exec(str))){ textParts.push(hexToString(m[1])) }
+    const pageText=cleanupPdfText(textParts.join(' '))
+    return [{index:1,text:pageText}]
+  }
+  return pages
+}
+function unescapePdfString(s){ const inner=s.replace(/\)\s*(Tj|TJ)$/,'').replace(/^\(/,'').replace(/\)$/,''); return inner.replace(/\\([nrtbf\\()])/g,(m,c)=>({n:'\n',r:'\r',t:'\t',b:'\b',f:'\f','\\':'\\','(':'(',')':')'}[c]||c)) }
+function hexToString(hex){ try{const clean=hex.replace(/\s+/g,''); const bytes=clean.match(/.{1,2}/g)||[]; return String.fromCharCode(...bytes.map(h=>parseInt(h,16))) }catch{return ''} }
+function cleanupPdfText(t){ return t.replace(/\s{2,}/g,' ').replace(/\s+([,.;:!?])/g,'$1').trim() }
+
+function renderSources(){
+  const L=UI.sourcesList; const R=UI.sourcesListRight; L.innerHTML=''; R.innerHTML=''
+  state.sources.forEach(s=>{
+    const d=document.createElement('div'); d.className='item'
+    d.innerHTML=`<div class="srcRow"><div><div><strong>${esc(s.title)}</strong></div><div class="tiny">${esc(s.filename)} · ${s.pages.length} pages</div></div><span><button class="xbtn" data-open="${s.source_id}">Open</button> <button class="xbtn" data-del="${s.source_id}">Delete</button></span></div>`
+    L.appendChild(d)
+    const d2=document.createElement('div'); d2.className='item'; d2.innerHTML=`<div><div><strong>${esc(s.title)}</strong></div><div class="tiny">${esc(s.filename)} · ${s.pages.length} pages</div></div>`; R.appendChild(d2)
+  })
+  L.querySelectorAll('[data-del]').forEach(btn=>btn.addEventListener('click',()=>{ const id=btn.getAttribute('data-del'); state.sources=state.sources.filter(x=>x.source_id!==id); renderSources(); toast('Source removed')}))
+  L.querySelectorAll('[data-open]').forEach(btn=>btn.addEventListener('click',()=>openSource(btn.getAttribute('data-open'))))
+}
+
+function openSource(id){
+  const s=state.sources.find(x=>x.source_id===id); if(!s) return
+  const html='<div class="panel"><div class="row" style="justify-content:space-between"><strong>'+esc(s.title)+'</strong><button class="ghost" onclick="document.body.removeChild(this.closest(\'div.modal\'))">Close</button></div>'+s.pages.map(p=>`<details><summary>Page ${p.index}</summary><pre style="white-space:pre-wrap">${esc(p.text||'(no text found)')}</pre></details>`).join('')+'</div>'
+  const m=document.createElement('div'); m.className='modal'; m.style.cssText='position:fixed;inset:0;background:#0008;display:flex;align-items:center;justify-content:center;z-index:50'; m.innerHTML='<div style="max-width:900px;width:92%;max-height:80%;overflow:auto">'+html+'</div>'; document.body.appendChild(m)
+}
+
+function analyze(question){
+  try{
+    if(!question){toast('Type a question');return}
+    if(state.sources.length===0){toast('Add at least one source');return}
+    log('Analyze start')
+    const corpus=state.sources.flatMap(s=>s.pages.map(p=>({source_id:s.source_id,title:s.title,page:p.index,text:p.text})))
+    const docs=corpus.length
+    const tf=new Map(), df=new Map(); let totalTokens=0, totalSents=0
+    for(const d of corpus){ const sents=splitSentences(d.text); totalSents+=sents.length; const tokens=uniq(tokenize(d.text)); totalTokens+=tokens.length; for(const t of tokens){ df.set(t,(df.get(t)||0)+1) } for(const t of tokenize(d.text)){ tf.set(t,(tf.get(t)||0)+1) } }
+    function scoreTerm(t){ const idf=Math.log((docs+1)/((df.get(t)||1))); return (tf.get(t)||0)*idf }
+    const qTokens=uniq(tokenize(question)).filter(t=>t.length>2)
+    const topTerms=Array.from(new Set([...qTokens, ...Array.from(tf.keys()).sort((a,b)=>scoreTerm(b)-scoreTerm(a)).slice(0,20)])).slice(0,20)
+    const sentScores=[]
+    for(const d of corpus){ const sents=splitSentences(d.text); for(const s of sents){ const toks=tokenize(s); let score=0; for(const t of topTerms){ if(toks.includes(t)) score+=1 } if(score>0){ sentScores.push({ s:s.trim(), score, source_id:d.source_id, title:d.title, page:d.page }) } } }
+    sentScores.sort((a,b)=>b.score-a.score)
+    let topSents=sentScores.slice(0,12)
+    if(topSents.length===0){ log('No sentences matched. Creating a placeholder node.'); state.kg={question,answer_summary:'No direct answer found in the corpus. Check that the PDF has selectable text.',confidence:0,nodes:[{id:uid('n'),label:question,type:'topic'}],edges:[],claims:[],evidence:[],sources: state.sources.map(s=>({source_id:s.source_id,title:s.title,filename:s.filename,url:s.url,created_at:s.created_at,pages:s.pages.map(p=>({index:p.index,char_count:(p.text||'').length}))})),contradictions:[],open_questions:['Provide a text based source or paste text'],metrics:{doc_tokens:0}}; UI.answerText.textContent=state.kg.answer_summary; drawGraph(); log('Analyze end'); return }
+
+    const nodes=[], edges=[], claims=[], evidence=[]
+    const qNode={id:uid('n'),label:question,type:'topic'}; nodes.push(qNode)
+    const termNodes=topTerms.slice(0,6).map(t=>({id:uid('n'),label:t,type:'topic'})); nodes.push(...termNodes); termNodes.forEach(n=>edges.push({source:qNode.id,target:n.id,type:'relates_to',weight:.6}))
+    for(const ts of topSents){ const cId=uid('c'); const evId=uid('ev'); claims.push({id:cId,text:ts.s,stance:'neutral',strength:Math.min(1,ts.score/6),source_ids:[ts.source_id],evidence_ids:[evId],tags:[]}); evidence.push({id:evId,source_id:ts.source_id,page:ts.page,start:0,end:Math.min(220,ts.s.length),quote:ts.s.slice(0,220)}); const srcNode={id:uid('n'),label:ts.title,type:'source',source_id:ts.source_id}; nodes.push({id:cId,label:ts.s.slice(0,60)+'…',type:'claim'}); nodes.push(srcNode); edges.push({source:cId,target:srcNode.id,type:'supported_by',weight:Math.min(1,ts.score/6)}); edges.push({source:qNode.id,target:cId,type:'addresses',weight:0.6}) }
+
+    const confidence=Math.min(1,topSents.length/12)
+    state.kg={question,answer_summary: topSents.slice(0,2).map(x=>x.s).join(' '),confidence,nodes,edges,claims,evidence,sources: state.sources.map(s=>({source_id:s.source_id,title:s.title,filename:s.filename,url:s.url,created_at:s.created_at,pages:s.pages.map(p=>({index:p.index,char_count:(p.text||'').length}))})),contradictions:[],open_questions:[],metrics:{}}
+    UI.confFill.style.width=(confidence*100).toFixed(0)+'%'; UI.confLabel.textContent=confidence.toFixed(2)
+    UI.answerText.textContent=state.kg.answer_summary
+    renderFindings(); renderEvidence(); drawGraph(); log('Analyze end')
+  }catch(err){ log('analyze error: '+(err.message||err)); alert('Analyze failed: '+err.message) }
+}
+
+function splitSentences(t){
+  if(!t) return []
+  const s = (t+"").replace(/[•\u2022\u25CF\-\u2219]/g,'. ').replace(/\s+/g,' ')
+  const parts = s.split(/(?<=[.!?])\s+|\n+|;+/)
+  return parts.map(x=>x.trim()).filter(x=>x.length>8)
+}
+function tokenize(t){return (t||'').toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}_-]*/gu)||[]}
+function uniq(a){return Array.from(new Set(a))}
+
+function renderFindings(){ const kg=state.kg; const box=UI.findingsList; if(!kg||!kg.claims){box.innerHTML='';return} box.innerHTML=kg.claims.slice(0,12).map(c=>{ return `<div class="item"><div>${esc(c.text||'')}</div></div>` }).join('') }
+function renderEvidence(){ const kg=state.kg; const box=UI.evidenceList; if(!kg){box.innerHTML='';return} box.innerHTML=(kg.evidence||[]).slice(0,20).map(ev=>{ return `<div class="item"><div class="tiny">page ${ev.page}</div><blockquote>“${esc(ev.quote||'')}”</blockquote></div>` }).join('') }
+
+function generateReport(){ if(!state.kg){alert('Analyze first');return} const md=`# ${state.kg.question}\n\n## Direct answer\n${state.kg.answer_summary}`; const blob=new Blob([md],{type:'text/markdown'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='qwello_report.md'; a.click(); URL.revokeObjectURL(url) }
+
+let svg,gEdges,gNodes,anim
+function drawGraph(){ initSvg(); if(!state.kg) return; const kg=state.kg; const minW=Number(UI.minWeight.value); const nodes=kg.nodes||[]; const edges=(kg.edges||[]).filter(e=>e.weight==null||e.weight>=minW); nodes.forEach((n,i)=>{ if(!state.layout.nodes.has(n.id)) state.layout.nodes.set(n.id,{x:420+Math.cos(i)*140,y:280+Math.sin(i)*140,vx:0,vy:0}) }); state.layout.edges=edges; gEdges.innerHTML=''; edges.forEach(e=>{ const line=NS('line'); line.classList.add('edge'); if(e.type==='contradicts') line.classList.add('conflict'); if(e.weight>0.8) line.classList.add('strong'); line.dataset.source=e.source; line.dataset.target=e.target; gEdges.appendChild(line) }); gNodes.innerHTML=''; nodes.forEach(n=>{ const g=NS('g'); g.classList.add('node'); g.dataset.id=n.id; const c=NS('circle'); c.setAttribute('r', n.type==='claim'?14: n.type==='source'?12:10); c.setAttribute('fill', n.type==='claim'? '#173b35' : n.type==='source'? '#3a2d13' : n.type==='topic'? '#161d55' : '#102b3b'); c.setAttribute('stroke', n.type==='claim'? '#20d497' : n.type==='source'? '#ffbd4a' : n.type==='topic'? '#8ea2ff' : '#7ef0ff'); const t=NS('text'); t.setAttribute('text-anchor','middle'); t.setAttribute('dy','.35em'); t.textContent=n.label; g.appendChild(c); g.appendChild(t); enableDrag(g); gNodes.appendChild(g) }); if(UI.physicsToggle.checked){ cancelAnimationFrame(anim); step() } else renderPositions() }
+function initSvg(){ const box=id('graph'); box.innerHTML=''; svg=NS('svg'); gEdges=NS('g'); gNodes=NS('g'); svg.appendChild(gEdges); svg.appendChild(gNodes); box.appendChild(svg) }
+function NS(tag){ return document.createElementNS('http://www.w3.org/2000/svg',tag) }
+function step(){ const nodes=[...gNodes.querySelectorAll('g.node')]; const edges=[...gEdges.querySelectorAll('line')]; const pos=new Map(nodes.map(n=>[n.dataset.id,state.layout.nodes.get(n.dataset.id)])); const center={x:svg.clientWidth/2,y:svg.clientHeight/2}; nodes.forEach(n=>{ const p=pos.get(n.dataset.id); p.vx+=(center.x-p.x)*0.02; p.vy+=(center.y-p.y)*0.02 }); edges.forEach(e=>{ const a=state.layout.nodes.get(e.dataset.source), b=state.layout.nodes.get(e.dataset.target); if(!a||!b) return; const dx=b.x-a.x, dy=b.y-a.y; const dist=Math.hypot(dx,dy)+1e-6; const desired=110; const f=(dist-desired)*0.02; const fx=f*dx/dist, fy=f*dy/dist; if(!state.pinned.has(e.dataset.source)){a.vx+=fx; a.vy+=fy} if(!state.pinned.has(e.dataset.target)){b.vx-=fx; b.vy-=fy} }); for(let i=0;i<nodes.length;i++) for(let j=i+1;j<nodes.length;j++){ const a=state.layout.nodes.get(nodes[i].dataset.id), b=state.layout.nodes.get(nodes[j].dataset.id); const dx=b.x-a.x, dy=b.y-a.y; const d2=dx*dx+dy*dy+0.01; const f=900/d2; if(!state.pinned.has(nodes[i].dataset.id)){a.vx-=f*dx; a.vy-=f*dy} if(!state.pinned.has(nodes[j].dataset.id)){b.vx+=f*dx; b.vy+=f*dy} } nodes.forEach(n=>{ const p=state.layout.nodes.get(n.dataset.id); p.vx*=0.9; p.vy*=0.9; p.x+=p.vx; p.y+=p.vy }); renderPositions(); anim=requestAnimationFrame(step) }
+function renderPositions(){ const nodes=[...gNodes.querySelectorAll('g.node')]; const edges=[...gEdges.querySelectorAll('line')]; nodes.forEach(n=>{ const p=state.layout.nodes.get(n.dataset.id); n.setAttribute('transform',`translate(${p.x},${p.y})`) }); edges.forEach(e=>{ const a=state.layout.nodes.get(e.dataset.source), b=state.layout.nodes.get(e.dataset.target); e.setAttribute('x1',a.x); e.setAttribute('y1',a.y); e.setAttribute('x2',b.x); e.setAttribute('y2',b.y) }) }
+
+</script>
+</body>
+</html>
