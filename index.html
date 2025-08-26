@@ -32,20 +32,83 @@ function openCtx(ev,node){ev.preventDefault();UI.ctxBtns.innerHTML='';const menu
 function expandAround(node){if(!state.kg)return;const terms=uniq(tokenize(node.label).map(normalizeToken)).filter(x=>x.length>2);if(!terms.length)return toast('Nothing to expand');const matches=[];state.sources.forEach(s=>s.pages.forEach(p=>splitSentences(p.text).forEach(sen=>{const toks=tokenize(sen).map(normalizeToken);let hit=0;terms.forEach(t=>{if(toks.includes(t))hit++});if(hit>=Math.min(2,terms.length))matches.push({sen,source_id:s.source_id,title:s.title,page:p.index,score:hit})})));matches.sort((a,b)=>b.score-a.score);const pick=matches.slice(0,8);const around=state.layout.nodes.get(node.id)||{x:0,y:0};let ang=0,step=(Math.PI*2)/(pick.length||1);pick.forEach(m=>{const cId=uid('c'),evId=uid('ev');state.kg.claims.push({id:cId,text:m.sen,stance:'neutral',strength:clamp(m.score/5,0,1),source_ids:[m.source_id],evidence_ids:[evId],tags:[],score:0.3});state.kg.evidence.push({id:evId,source_id:m.source_id,page:m.page,quote:m.sen.slice(0,220)});state.kg.nodes.push({id:cId,label:m.sen.slice(0,60)+'…',type:'claim'});const src={id:uid('n'),label:m.title,type:'source',source_id:m.source_id};state.kg.nodes.push(src);state.kg.edges.push({source:cId,target:src.id,type:'supported_by',weight:0.5},{source:node.id,target:cId,type:'relates_to',weight:0.7});const r=140+Math.random()*40;state.layout.nodes.set(cId,{x:around.x+Math.cos(ang)*r,y:around.y+Math.sin(ang)*r,vx:0,vy:0});ang+=step});computeClusters();computeHubScores();renderFindings();renderEvidence();drawGraph();if(UI.autoFit.checked)setTimeout(fitView,30)}
 function summarizeNode(node){if(!state.kg)return;const terms=uniq(tokenize(node.label).map(normalizeToken));const pool=[];state.sources.forEach(s=>s.pages.forEach(p=>splitSentences(p.text).forEach(sen=>{const toks=tokenize(sen).map(normalizeToken);const hit=terms.filter(t=>toks.includes(t)).length;if(hit>0)pool.push({sen,hit})})));pool.sort((a,b)=>b.hit-a.hit);const summary=pool.slice(0,6).map(x=>'• '+x.sen).join('\n');showModal('<h3>Summary</h3><pre>'+esc(summary||'No matching text found')+'</pre>')}
 function counterNode(node){if(!state.kg)return;const neg=['however','but','not ','lacks','fails','concern','limitation','risk','problem'];const terms=uniq(tokenize(node.label).map(normalizeToken));const hits=[];state.sources.forEach(s=>s.pages.forEach(p=>splitSentences(p.text).forEach(sen=>{const low=sen.toLowerCase();if(!neg.some(n=>low.includes(n)))return;const toks=tokenize(sen).map(normalizeToken);if(terms.some(t=>toks.includes(t)))hits.push({sen,source_id:s.source_id,title:s.title,page:p.index})})));if(!hits.length)return toast('No obvious counterevidence found');hits.slice(0,4).forEach(h=>{const cId=uid('c'),evId=uid('ev');state.kg.claims.push({id:cId,text:h.sen,stance:'contra',strength:0.4,source_ids:[h.source_id],evidence_ids:[evId],tags:['counter'],score:0.35});state.kg.evidence.push({id:evId,source_id:h.source_id,page:h.page,quote:h.sen.slice(0,220)});state.kg.nodes.push({id:cId,label:h.sen.slice(0,60)+'…',type:'claim'});const src={id:uid('n'),label:h.title,type:'source',source_id:h.source_id};state.kg.nodes.push(src);state.kg.edges.push({source:cId,target:src.id,type:'supported_by',weight:0.4},{source:node.id,target:cId,type:'contradicts',weight:0.8});const p=state.layout.nodes.get(node.id)||{x:0,y:0};state.layout.nodes.set(cId,{x:p.x+120,y:p.y+60,vx:0,vy:0})});computeClusters();computeHubScores();renderFindings();renderEvidence();drawGraph();if(UI.autoFit.checked)setTimeout(fitView,30)}
-function pathToQuestion(node){if(!state.kg)return;const start=node.id;let goal=state.questionNodeId||(state.kg.nodes.find?state.kg.nodes.find(n=>n.type==='topic'):null);goal=goal?goal.id:null;const nb=new Map();state.kg.edges.forEach(e=>{(nb.get(e.source)||nb.set(e.source,[]).get(e.source)).push(e.target);(nb.get(e.target)||nb.set(e.target,[]).get(e.target)).push(e.source)});const q=[[start]],seen=new Set([start]);let found=null;while(q.length){const path=q.shift();const last=path[path.length-1];if(last===goal){found=path;break}(nb.get(last)||[]).forEach(x=>{if(!seen.has(x)){seen.add(x);q.push(path.concat([x]))}})}if(!found)re
-// === UI wiring (place near the end of your <script>) ===
-function loadDemo() {
-  // You can replace this with your real demo content
-  const demo = `Qwello demo corpus. Replace with real text or PDFs.`;
+function pathToQuestion(node){
+  if(!state.kg) return;
+  const goal = state.questionNodeId || (state.kg.nodes.find(n => n.type === 'topic') || {}).id;
+  if(!goal){ toast('Ask a question first'); return; }
+  const start = node.id;
+
+  // Build undirected adjacency
+  const nb = new Map();
+  state.kg.edges.forEach(e => {
+    (nb.get(e.source) || nb.set(e.source, []).get(e.source)).push(e.target);
+    (nb.get(e.target) || nb.set(e.target, []).get(e.target)).push(e.source);
+  });
+
+  // BFS from start to goal
+  const q = [start];
+  const prev = new Map([[start, null]]);
+  while (q.length){
+    const v = q.shift();
+    if (v === goal) break;
+    for (const u of nb.get(v) || []){
+      if (!prev.has(u)){ prev.set(u, v); q.push(u); }
+    }
+  }
+
+  if (!prev.has(goal)){ toast('No path found'); return; }
+
+  // Reconstruct and show a simple path summary
+  const path = [];
+  let cur = goal;
+  while (cur != null){ path.push(cur); cur = prev.get(cur); }
+  path.reverse();
+
+  const html = path.map(id => {
+    const n = state.kg.nodes.find(x => x.id === id);
+    return n ? `<div class="tiny">${esc(n.type)}: ${esc(n.label)}</div>` : `<div class="tiny">${id}</div>`;
+  }).join('');
+  showModal(`<h3>Shortest path</h3>${html}`);
+}
+
+// Simple modal helper (used elsewhere in your code)
+function showModal(innerHtml){
+  const m = document.createElement('div');
+  m.className = 'modal';
+  m.innerHTML = `<div class="box">${innerHtml}<div style="text-align:right;margin-top:10px"><button class="secondary" id="modalClose">Close</button></div></div>`;
+  document.body.appendChild(m);
+  const close = () => m.remove();
+  m.addEventListener('click', (e) => {
+    if (e.target === m || e.target.id === 'modalClose') close();
+  });
+}
+
+// Evidence viewer for claim nodes (your graph calls this)
+function openEvidence(node){
+  if(!state.kg) return;
+  const c = state.kg.claims.find(x => x.id === node.id);
+  if(!c){ toast('No evidence for this'); return; }
+  const items = (c.evidence_ids || []).map(eid => {
+    const ev = state.kg.evidence.find(e => e.id === eid);
+    if(!ev) return '';
+    const src = state.kg.sources.find(s => s.source_id === ev.source_id);
+    const title = src ? src.title : 'Source';
+    return `<div class="item"><div class="tiny">${esc(title)} · page ${ev.page}</div><blockquote>“${esc(ev.quote || '')}”</blockquote></div>`;
+  }).join('');
+  showModal(`<h3>Evidence</h3>${items || '<div class="tiny">None captured.</div>'}`);
+}
+
+/* === UI wiring === */
+function loadDemo(){
+  const demo = 'Qwello demo corpus. Replace with real text or PDFs.';
   addSourceFromText('Demo corpus', demo);
 }
 
-function wireUI() {
-  // Build the SVG once so the canvas is ready
+function wireUI(){
   initSvg();
   updateAsk();
 
-  // Ask button → run analysis
+  // Ask button
   UI.askBtn.addEventListener('click', () => {
     const q = (UI.q.value || '').trim();
     analyze(q);
@@ -53,7 +116,7 @@ function wireUI() {
 
   // Enter to Ask
   UI.q.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
+    if(e.key === 'Enter'){
       e.preventDefault();
       const q = (UI.q.value || '').trim();
       analyze(q);
@@ -63,21 +126,21 @@ function wireUI() {
   // File uploads
   UI.filePicker.addEventListener('change', onPickFiles);
 
-  // Paste-add as a source
+  // Paste -> Add
   UI.addPaste.addEventListener('click', () => {
     const text = (UI.pasteArea.value || '').trim();
-    if (!text) { toast('Paste some text first'); return; }
+    if(!text){ toast('Paste some text first'); return; }
     const name = (UI.pasteTitle.value || '').trim() || 'Pasted text';
     addSourceFromText(name, text);
     UI.pasteArea.value = '';
     UI.pasteTitle.value = '';
   });
 
-  // Demo corpus buttons
+  // Demo
   UI.demoBtn.addEventListener('click', loadDemo);
   UI.emptyDemo.addEventListener('click', loadDemo);
 
-  // Preset pills set the question and ask
+  // Preset pills
   UI.presetBar.querySelectorAll('.pill').forEach(p => {
     p.addEventListener('click', () => {
       const q = p.dataset.q || '';
@@ -85,7 +148,17 @@ function wireUI() {
       analyze(q);
     });
   });
+
+  // Optional quality-of-life buttons
+  UI.resetBtn.addEventListener('click', resetFilters);
+  UI.fitBtn.addEventListener('click', fitView);
+  UI.clearAllBtn.addEventListener('click', () => {
+    state.sources = [];
+    renderSources();
+    updateAsk();
+    toast('All sources cleared');
+  });
 }
 
-// Run the wiring after the script loads
-wireUI();
+// Start after DOM is ready (robust even if the script tag moves)
+document.addEventListener('DOMContentLoaded', wireUI);
