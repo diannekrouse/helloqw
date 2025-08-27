@@ -209,4 +209,9 @@ function wireUI(){
 }
 
 // Start after DOM is ready (robust even if the script tag moves)
-document.addEventListener('DOMContentLoaded', wireUI);
+if (document.readyState === 'loading'){
+  document.addEventListener('DOMContentLoaded', wireUI);
+} else {
+  wireUI();
+}
+
