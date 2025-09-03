@@ -1,0 +1,653 @@
+import React, { useMemo, useRef, useState } from "react"
+import { X, Timer, Gauge, Image as ImgIcon, AlertTriangle, Check, Loader2, ShieldAlert, Bug } from "lucide-react"
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf"
+
+
+/**
+ * Qwello Prototype v1.1 — PDF text first with safe no‑worker mode
+ *
+ * Fixes
+ * - Removes any attempt to fetch a PDF worker script from a CDN
+ * - Forces `disableWorker: true` for reliability in Canvas, GitHub Pages, and other sandboxes
+ * - Adds defensive guards around `getOperatorList()` for figure counting
+ * - Adds a small self‑test panel to verify helper functions without external files
+ *
+ * What it does
+ * 1) Accepts a question + a PDF
+ * 2) Extracts native text quickly for a first Knowledge Graph
+ * 3) Counts figures and estimates OCR time
+ * 4) If estimate <= 30 s: runs simulated OCR in parallel
+ *    If estimate > 30 s: prompts the user to include figures now or skip
+ * 5) Shows timings and lets you click graph nodes to see page hits in a sidebar
+ */
+
+// -------------------- Types --------------------
+
+type Node = { id: string; label: string; type?: string; score?: number }
+
+type Edge = { id: string; from: string; to: string; label?: string }
+
+type GraphData = { nodes: Node[]; edges: Edge[] }
+
+type Report = { title: string; summary: string[]; keyFindings: string[]; recommendations?: string[] }
+
+type Timings = { tStart: number; ttfvMs?: number; parseMs?: number; figureEstimateMs?: number; figureActualMs?: number }
+
+// -------------------- Config --------------------
+
+const MAX_TERMS = 8
+const OCR_SECONDS_PER_FIGURE_EST = 2 // rough estimate per figure
+const FIGURE_PROMPT_THRESHOLD_MS = 30_000
+
+const STOP = new Set([
+  "the","and","a","an","of","to","in","for","on","with","by","as","at","is","are","was","were","be","this","that","it","from","or","not","we","you","your","their","our","can","will","may","but","if","then","than","into","out","about","over","under","between","more","most","less","least","also","such","based","using","use","used","according","which","who","what","when","where","why","how"
+])
+
+// -------------------- Helpers --------------------
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+function prettyMs(ms?: number) {
+  if (ms == null) return "—"
+  if (ms < 1000) return `${ms} ms`
+  const s = ms / 1000
+  return s < 60 ? `${s.toFixed(1)} s` : `${(s / 60).toFixed(1)} min`
+}
+
+function circleLayout(count: number, radius: number, cx: number, cy: number) {
+  const pts: { x: number; y: number }[] = []
+  for (let i = 0; i < count; i++) {
+    const angle = (i / count) * Math.PI * 2
+    pts.push({ x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) })
+  }
+  return pts
+}
+
+function slug(s: string) {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "")
+}
+
+function freqTerms(pages: string[]): { term: string; score: number; pages: number[] }[] {
+  const perPage = pages.map((t) => t.toLowerCase())
+  const counts = new Map<string, number>()
+  const termPages = new Map<string, Set<number>>()
+  perPage.forEach((t, idx) => {
+    for (const raw of t.split(/[^a-z0-9]+/g)) {
+      const w = raw.trim()
+      if (!w || STOP.has(w) || w.length < 3) continue
+      counts.set(w, (counts.get(w) || 0) + 1)
+      if (!termPages.has(w)) termPages.set(w, new Set())
+      termPages.get(w)!.add(idx + 1)
+    }
+  })
+  const arr = [...counts.entries()].map(([term, score]) => ({ term, score, pages: [...(termPages.get(term) || new Set())] }))
+  arr.sort((a, b) => b.score - a.score)
+  return arr.slice(0, MAX_TERMS)
+}
+
+function buildGraph(rootLabel: string, terms: { term: string; score: number }[]): GraphData {
+  const rootId = slug(rootLabel || "Topic")
+  const nodes: Node[] = [{ id: rootId, label: rootLabel || "Topic", type: "topic" }]
+  const edges: Edge[] = []
+  terms.forEach((t, i) => {
+    const id = slug(t.term)
+    nodes.push({ id, label: t.term, type: "term", score: t.score })
+    edges.push({ id: `e${i}`, from: rootId, to: id, label: "relates" })
+  })
+  return { nodes, edges }
+}
+
+// -------------------- PDF pipeline --------------------
+
+async function extractPdfNative(file: File, opts: { quickPages: number }) {
+  const t0 = performance.now()
+  const buf = await file.arrayBuffer()
+
+  // Try robust no-worker path first. If the runtime still complains about workerSrc,
+  // retry with explicit worker:null and disableWorker:true combos.
+  let pdf: any
+  try {
+    pdf = await (pdfjsLib as any).getDocument({ data: buf, disableWorker: true, worker: null }).promise
+  } catch (e1) {
+    try { (window as any).pdfjsDisableWorker = true } catch {}
+    try {
+      pdf = await (pdfjsLib as any).getDocument({ data: buf, disableWorker: true }).promise
+    } catch (e2) {
+      throw new Error((e2 as any)?.message || (e1 as any)?.message || "PDF parse failed")
+    }
+  }
+
+  const totalPages = pdf.numPages
+  const quickPages = Math.min(opts.quickPages, totalPages)
+
+  // 1) Quick slice for TTFV
+  const firstTexts: string[] = []
+  for (let p = 1; p <= quickPages; p++) {
+    const page = await pdf.getPage(p)
+    const text = await page.getTextContent()
+    firstTexts.push(text.items.map((it: any) => (it.str || "")).join(" "))
+  }
+
+  // 2) Count figures across all pages, with a safe fallback
+  let figureCount = 0
+  let figureScanSupported = true
+  const OPS = (pdfjsLib as any).OPS
+  const imageOps = OPS
+    ? new Set([OPS.paintImageXObject, OPS.paintInlineImageXObject, OPS.paintJpegXObject])
+    : null
+
+  for (let p = 1; p <= totalPages; p++) {
+    const page = await pdf.getPage(p)
+    try {
+      // Not available in very old builds. Wrapped in try to keep demo robust.
+      // @ts-ignore
+      const opList = await page.getOperatorList()
+      if (imageOps && opList && (opList as any).fnArray) {
+        // @ts-ignore
+        for (const fn of opList.fnArray) {
+          // @ts-ignore
+          if (imageOps.has(fn)) figureCount++
+        }
+      } else {
+        figureScanSupported = false
+      }
+    } catch {
+      figureScanSupported = false
+    }
+  }
+
+  const tQuick = performance.now() - t0
+
+  // 3) Continue full text for the rest
+  const allTexts = [...firstTexts]
+  for (let p = quickPages + 1; p <= totalPages; p++) {
+    const page = await pdf.getPage(p)
+    const text = await page.getTextContent()
+    allTexts.push(text.items.map((it: any) => (it.str || "")).join(" "))
+  }
+
+  const tFull = performance.now() - t0
+  const estimateMs = figureCount * OCR_SECONDS_PER_FIGURE_EST * 1000
+
+  return {
+    totalPages,
+    quickTextPages: firstTexts,
+    allTextPages: allTexts,
+    figureCount,
+    figureScanSupported,
+    tQuick,
+    tFull,
+    estimateMs,
+  }
+}
+
+async function simulateOCR(figures: number, onProgress: (pct: number) => void) {
+  const ms = Math.max(1, figures) * OCR_SECONDS_PER_FIGURE_EST * 1000
+  const start = performance.now()
+  while (true) {
+    const now = performance.now()
+    const pct = Math.min(100, ((now - start) / ms) * 100)
+    onProgress(pct)
+    if (pct >= 100) break
+    await sleep(120)
+  }
+  return { figures, notes: `Simulated OCR done for ${figures} figures` }
+}
+
+// -------------------- UI bits --------------------
+
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return <h2 className="text-xl font-semibold tracking-tight mb-2">{children}</h2>
+}
+
+function Pill({ children }: { children: React.ReactNode }) {
+  return <span className="rounded-2xl px-3 py-1 text-xs border border-white/15 bg-white/5 backdrop-blur">{children}</span>
+}
+
+function Spinner() { return <Loader2 className="w-5 h-5 animate-spin" aria-label="Loading" /> }
+
+function Bar({ value }: { value: number }) {
+  return (
+    <div className="w-full h-2 rounded-full bg-white/10">
+      <div className="h-2 rounded-full bg-[#8ea2ff]" style={{ width: `${Math.max(0, Math.min(100, value))}%` }} />
+    </div>
+  )
+}
+
+function SVGGraph({ graph, onSelect }: { graph: GraphData; onSelect: (id: string) => void }) {
+  const w = 680
+  const h = 420
+  const center = { x: w / 2, y: h / 2 }
+  const outer = circleLayout(Math.max(1, graph.nodes.length - 1), 150, center.x, center.y)
+  const pos = useMemo(() => {
+    const m: Record<string, { x: number; y: number }> = {}
+    graph.nodes.forEach((n, i) => { m[n.id] = i === 0 ? center : outer[i - 1] })
+    return m
+  }, [graph])
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-[420px] rounded-2xl bg-white/5 border border-white/10">
+      <g stroke="currentColor" strokeOpacity={0.3} strokeWidth={1}>
+        {graph.edges.map((e) => {
+          const a = pos[e.from], b = pos[e.to]
+          if (!a || !b) return null
+          return <line key={e.id} x1={a.x} y1={a.y} x2={b.x} y2={b.y} />
+        })}
+      </g>
+      <g>
+        {graph.nodes.map((n) => {
+          const p = pos[n.id]
+          if (!p) return null
+          return (
+            <g key={n.id} onClick={() => onSelect(n.id)} style={{ cursor: "pointer" }}>
+              <circle cx={p.x} cy={p.y} r={18} fill="currentColor" fillOpacity={0.1} stroke="currentColor" strokeOpacity={0.4} />
+              <text x={p.x} y={p.y - 28} textAnchor="middle" className="text-[10px] fill-current">{n.type || "node"}</text>
+              <text x={p.x} y={p.y + 4} textAnchor="middle" className="text-[12px] font-medium fill-current">{n.label}</text>
+            </g>
+          )
+        })}
+      </g>
+    </svg>
+  )
+}
+
+function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative w-full max-w-lg rounded-2xl border border-white/15 bg-[#111428] p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-semibold">{title}</h3>
+          <button onClick={onClose} className="p-1 rounded hover:bg-white/10"><X className="w-5 h-5" /></button>
+        </div>
+        {children}
+      </div>
+    </div>
+  )
+}
+
+// -------------------- Main --------------------
+
+export default function QwelloPrototypePDF() {
+  const [question, setQuestion] = useState("")
+  const [file, setFile] = useState<File | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const [timings, setTimings] = useState<Timings>({ tStart: 0 })
+
+  // Results
+  const [report, setReport] = useState<Report | null>(null)
+  const [graph, setGraph] = useState<GraphData | null>(null)
+  const [selectedNode, setSelectedNode] = useState<string | null>(null)
+
+  // PDF info
+  const [pages, setPages] = useState<string[]>([])
+  const [figures, setFigures] = useState<number>(0)
+  const [figureEstimateMs, setFigureEstimateMs] = useState<number>(0)
+  const [figureScanSupported, setFigureScanSupported] = useState<boolean>(true)
+
+  // OCR sim
+  const [showFigurePrompt, setShowFigurePrompt] = useState(false)
+  const [ocrPct, setOcrPct] = useState(0)
+  const [ocrRunning, setOcrRunning] = useState(false)
+
+  // Diagnostics
+  const [tests, setTests] = useState<{ name: string; ok: boolean; msg?: string }[] | null>(null)
+
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  async function handleAsk() {
+    try {
+      setError(null)
+      if (!file || !question) throw new Error("Add a PDF and a question")
+      if (file.type !== "application/pdf") throw new Error("Please upload a PDF")
+      setBusy(true)
+
+      const tStart = performance.now()
+      setTimings({ tStart })
+
+      const scan = await extractPdfNative(file, { quickPages: 3 })
+      setPages(scan.allTextPages)
+      setFigures(scan.figureCount)
+      setFigureEstimateMs(scan.estimateMs)
+      setFigureScanSupported(scan.figureScanSupported)
+
+      // Build first view KG
+      const terms = freqTerms(scan.quickTextPages)
+      const subject = file.name.replace(/\.pdf$/i, "") || "Document"
+      const g = buildGraph(subject, terms)
+      setGraph(g)
+
+      const rep: Report = {
+        title: `Executive report for ${subject}`,
+        summary: [
+          "Text first pass completed for speed to the graph.",
+          `Parsed ${scan.totalPages} pages of native text. Figures are counted separately.`,
+        ],
+        keyFindings: [
+          `First view built from ${scan.quickTextPages.length} page slice for speed.`,
+          `${scan.figureCount} figures detected in the PDF.`,
+          `Estimated time to add figures ${prettyMs(scan.estimateMs)}.`,
+        ],
+        recommendations: [
+          "Keep first view fast. Add figure OCR only when it helps clarity.",
+          "Swap simulated OCR with a real OCR endpoint when ready.",
+        ],
+      }
+      setReport(rep)
+
+      setTimings((t) => ({ ...t, ttfvMs: Math.round(performance.now() - tStart), parseMs: Math.round(scan.tFull) }))
+
+      if (scan.estimateMs <= FIGURE_PROMPT_THRESHOLD_MS) {
+        setOcrRunning(true)
+        const ocrStart = performance.now()
+        await simulateOCR(scan.figureCount, setOcrPct)
+        setTimings((t) => ({ ...t, figureEstimateMs: scan.estimateMs, figureActualMs: Math.round(performance.now() - ocrStart) }))
+        setOcrRunning(false)
+      } else {
+        setShowFigurePrompt(true)
+      }
+    } catch (e: any) {
+      setError(e.message || "Something went wrong")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function startFiguresNow() {
+    try {
+      setShowFigurePrompt(false)
+      setOcrRunning(true)
+      const ocrStart = performance.now()
+      await simulateOCR(figures, setOcrPct)
+      setTimings((t) => ({ ...t, figureEstimateMs: figureEstimateMs, figureActualMs: Math.round(performance.now() - ocrStart) }))
+    } finally {
+      setOcrRunning(false)
+    }
+  }
+
+  function resetAll() {
+    setQuestion("")
+    setFile(null)
+    setError(null)
+    setReport(null)
+    setGraph(null)
+    setSelectedNode(null)
+    setPages([])
+    setFigures(0)
+    setFigureEstimateMs(0)
+    setFigureScanSupported(true)
+    setOcrPct(0)
+    setOcrRunning(false)
+    setShowFigurePrompt(false)
+    if (fileRef.current) fileRef.current.value = ""
+    setTimings({ tStart: 0 })
+    setTests(null)
+  }
+
+  // Sidebar info for selected node
+  const nodeInfo = useMemo(() => {
+    if (!graph || !selectedNode) return null
+    const n = graph.nodes.find((x) => x.id === selectedNode)
+    if (!n) return null
+    const term = n.label.toLowerCase()
+    const hits: { page: number; snippet: string }[] = []
+    pages.forEach((text, idx) => {
+      const m = text.toLowerCase().indexOf(term)
+      if (m >= 0) {
+        const start = Math.max(0, m - 50)
+        const end = Math.min(text.length, m + term.length + 50)
+        hits.push({ page: idx + 1, snippet: text.slice(start, end).replace(/\s+/g, " ") })
+      }
+    })
+    return { node: n, hits }
+  }, [graph, selectedNode, pages])
+
+  const payload = useMemo(() => ({ report, graph, timings, figures, figureEstimateMs }), [report, graph, timings, figures, figureEstimateMs])
+
+  // -------------------- small self tests --------------------
+  function runTests() {
+    const results: { name: string; ok: boolean; msg?: string }[] = []
+
+    // prettyMs
+    try {
+      const a = prettyMs(999)
+      const b = prettyMs(1500)
+      const c = prettyMs(61_000)
+      results.push({ name: "prettyMs formats ms", ok: a.endsWith("ms") })
+      results.push({ name: "prettyMs formats seconds", ok: /\d+\.\d s/.test(b) })
+      results.push({ name: "prettyMs formats minutes", ok: /min$/.test(c) })
+    } catch (e: any) {
+      results.push({ name: "prettyMs", ok: false, msg: e.message })
+    }
+
+    // slug
+    try {
+      const s = slug("Hello, World!")
+      results.push({ name: "slug basic", ok: s === "hello-world" })
+    } catch (e: any) {
+      results.push({ name: "slug", ok: false, msg: e.message })
+    }
+
+    // buildGraph
+    try {
+      const g = buildGraph("Doc", [{ term: "alpha", score: 2 }, { term: "beta", score: 1 }])
+      results.push({ name: "graph has nodes", ok: g.nodes.length === 3 })
+      results.push({ name: "graph has edges", ok: g.edges.length === 2 })
+    } catch (e: any) {
+      results.push({ name: "buildGraph", ok: false, msg: e.message })
+    }
+
+    // freqTerms
+    try {
+      const terms = freqTerms(["Alpha beta alpha", "Beta beta gamma"]) // alpha x2, beta x3, gamma x1
+      const top = terms[0]?.term
+      results.push({ name: "freqTerms ranks top by count", ok: top === "beta" })
+    } catch (e: any) {
+      results.push({ name: "freqTerms", ok: false, msg: e.message })
+    }
+
+    // pdfjs presence (no network)
+    try {
+      const ok = typeof (pdfjsLib as any).getDocument === "function"
+      results.push({ name: "pdfjs getDocument available", ok })
+    } catch (e: any) {
+      results.push({ name: "pdfjs presence", ok: false, msg: e.message })
+    }
+
+    setTests(results)
+  }
+
+  return (
+    <div className="min-h-screen w-full text-white" style={{ background: "linear-gradient(180deg,#0e1022,#0b0f28 40%,#0a0f2b)" }}>
+      <div className="max-w-7xl mx-auto p-4 md:p-6 grid gap-4 md:gap-6">
+        {/* Header */}
+        <header className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Qwello PDF to KG</h1>
+            <p className="text-sm text-white/70">Speed to graph with native text first. Figures optional.</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button onClick={resetAll} className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-sm">Reset</button>
+            <a
+              onClick={() => {
+                const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" })
+                const url = URL.createObjectURL(blob)
+                const a = document.createElement("a")
+                a.href = url
+                a.download = "qwello-demo-output.json"
+                a.click()
+                URL.revokeObjectURL(url)
+              }}
+              className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-sm cursor-pointer"
+            >
+              Download JSON
+            </a>
+          </div>
+        </header>
+
+        {/* Controls */}
+        <section className="grid md:grid-cols-3 gap-4">
+          <div className="md:col-span-2 rounded-2xl border border-white/10 bg-white/5 p-4 md:p-5">
+            <SectionTitle>Input</SectionTitle>
+            <div className="grid gap-3">
+              <label className="text-sm">Question</label>
+              <input
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                placeholder="Example Summarize the key claims and evidence"
+                className="w-full rounded-xl bg-white/10 border border-white/15 px-3 py-2 outline-none focus:ring-2 focus:ring-white/20"
+              />
+              <label className="text-sm">PDF</label>
+              <input ref={fileRef} type="file" accept="application/pdf" onChange={(e) => setFile(e.target.files?.[0] || null)} className="w-full rounded-xl bg-white/10 border border-white/15 px-3 py-2" />
+              <div className="flex items-center gap-3 pt-1">
+                <button
+                  onClick={handleAsk}
+                  disabled={busy || !question || !file}
+                  className="px-4 py-2 rounded-2xl bg-[#8ea2ff] hover:bg-[#7b90ff] text-black font-semibold disabled:opacity-50 flex items-center gap-2"
+                >
+                  {busy ? (<><Spinner /> Thinking</>) : (<>Ask</>)}
+                </button>
+                <div className="flex items-center gap-2 text-xs text-white/70">
+                  <Pill>Text first</Pill>
+                  <Pill>No worker</Pill>
+                  <Pill>Fast demo</Pill>
+                </div>
+              </div>
+              {error ? <div className="text-sm text-red-300 flex items-center gap-2"><AlertTriangle className="w-4 h-4" /> {error}</div> : null}
+              {!figureScanSupported ? (
+                <div className="text-xs text-amber-300 flex items-center gap-2"><ShieldAlert className="w-4 h-4" /> Figure counting fallback used. Some PDFs may report fewer figures.</div>
+              ) : null}
+            </div>
+          </div>
+
+          {/* Timings card */}
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 md:p-5">
+            <SectionTitle>Timings</SectionTitle>
+            <div className="space-y-2 text-sm">
+              <div className="flex items-center gap-2"><Timer className="w-4 h-4" /> Time to first view <span className="ml-auto">{prettyMs(timings.ttfvMs)}</span></div>
+              <div className="flex items-center gap-2"><Gauge className="w-4 h-4" /> Full native parse <span className="ml-auto">{prettyMs(timings.parseMs)}</span></div>
+              <div className="flex items-center gap-2"><ImgIcon className="w-4 h-4" /> Figure estimate <span className="ml-auto">{prettyMs(figureEstimateMs)}</span></div>
+              <div className="flex items-center gap-2"><Check className="w-4 h-4" /> Figure actual <span className="ml-auto">{prettyMs(timings.figureActualMs)}</span></div>
+            </div>
+            {ocrRunning && (
+              <div className="mt-3">
+                <div className="text-xs mb-1">Figure scan progress</div>
+                <Bar value={ocrPct} />
+              </div>
+            )}
+
+            {/* Self tests */}
+            <div className="mt-4 border-t border-white/10 pt-3">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-sm font-medium flex items-center gap-2"><Bug className="w-4 h-4" /> Diagnostics</div>
+                <button onClick={runTests} className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/15 border border-white/15 text-xs">Run checks</button>
+              </div>
+              {tests && (
+                <ul className="text-xs space-y-1">
+                  {tests.map((t, i) => (
+                    <li key={i} className={t.ok ? "text-white/80" : "text-red-300"}>
+                      {t.ok ? "✓" : "✗"} {t.name}{t.msg ? ` — ${t.msg}` : ""}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </section>
+
+        {/* Results row */}
+        <section className="grid lg:grid-cols-3 gap-4">
+          {/* Report */}
+          <div className="lg:col-span-1 rounded-2xl border border-white/10 bg-white/5 p-4 md:p-5">
+            <SectionTitle>Executive report</SectionTitle>
+            {report ? (
+              <div className="space-y-3">
+                <h3 className="text-lg font-semibold">{report.title}</h3>
+                <div className="space-y-2">{report.summary.map((p, i) => (<p key={i} className="text-sm leading-relaxed text-white/90">{p}</p>))}</div>
+                <div>
+                  <h4 className="font-medium mb-1">Key findings</h4>
+                  <ul className="text-sm list-disc pl-5 space-y-1">{report.keyFindings.map((k, i) => (<li key={i}>{k}</li>))}</ul>
+                </div>
+              </div>
+            ) : (
+              <div className="text-sm text-white/70">Results will appear here after you click Ask</div>
+            )}
+          </div>
+
+          {/* Graph */}
+          <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-white/5 p-4 md:p-5">
+            <div className="flex items-center justify-between">
+              <SectionTitle>Knowledge graph</SectionTitle>
+              {graph ? <div className="flex items-center gap-2 text-xs text-white/70"><Pill>{graph.nodes.length} nodes</Pill><Pill>{graph.edges.length} edges</Pill></div> : null}
+            </div>
+            {graph ? (
+              <div className="grid lg:grid-cols-3 gap-4">
+                <div className="lg:col-span-2">
+                  <SVGGraph graph={graph} onSelect={setSelectedNode} />
+                </div>
+                <div className="lg:col-span-1 rounded-xl border border-white/10 bg-white/5 p-3">
+                  <h3 className="font-medium mb-2">Details</h3>
+                  {!selectedNode ? (
+                    <div className="text-sm text-white/70">Click any node to view info and source pages</div>
+                  ) : nodeInfo ? (
+                    <div className="text-sm space-y-2">
+                      <div className="text-white/90"><span className="font-medium">Node</span> {nodeInfo.node.label}</div>
+                      {typeof nodeInfo.node.score === "number" ? <div className="text-white/90"><span className="font-medium">Score</span> {nodeInfo.node.score}</div> : null}
+                      <div className="text-white/90"><span className="font-medium">Pages</span> {nodeInfo.hits.length ? nodeInfo.hits.map(h => h.page).join(", ") : "—"}</div>
+                      <div className="space-y-1 max-h-48 overflow-auto">
+                        {nodeInfo.hits.map((h, i) => (
+                          <div key={i} className="p-2 rounded border border-white/10 bg-black/20">
+                            <div className="text-xs text-white/60">Page {h.page}</div>
+                            <div className="text-xs">{h.snippet}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ) : (
+              <div className="text-sm text-white/70">The graph will render after analysis</div>
+            )}
+          </div>
+        </section>
+
+        {/* JSON */}
+        <section className="rounded-2xl border border-white/10 bg-white/5 p-4 md:p-5">
+          <SectionTitle>Raw JSON</SectionTitle>
+          {report || graph ? (
+            <pre className="text-xs bg-black/30 rounded-xl p-3 overflow-auto max-h-72 border border-white/10">{JSON.stringify(payload, null, 2)}</pre>
+          ) : (
+            <div className="text-sm text-white/70">No output yet</div>
+          )}
+        </section>
+
+        {/* Handoff */}
+        <section className="rounded-2xl border border-white/10 bg-white/5 p-4 md:p-5">
+          <SectionTitle>Handoff notes for dev</SectionTitle>
+          <ul className="text-sm list-disc pl-5 space-y-1 text-white/90">
+            <li>Endpoint A text first PDF parse. Input {`{ question, pdfBytes }`} Output {`{ pagesText, terms, figures, estimateMs }`}</li>
+            <li>Endpoint B figure OCR. Input {`{ pdfBytes or figureImages }`} Output {`{ captions, tables, pageRefs }`}</li>
+            <li>Keep TTFV under 12 s. Defer figure OCR unless estimate under 30 s or the user opts in.</li>
+            <li>Graph schema is node edge. Add citations to pages for each term.</li>
+          </ul>
+        </section>
+      </div>
+
+      {/* Figure prompt */}
+      {showFigurePrompt && (
+        <Modal title="Add figures to this run" onClose={() => setShowFigurePrompt(false)}>
+          <div className="text-sm space-y-3">
+            <div className="flex items-center gap-2"><ImgIcon className="w-4 h-4" /> Detected <b className="mx-1">{figures}</b> figures. Estimated time <b className="mx-1">{prettyMs(figureEstimateMs)}</b>.</div>
+            <p>Do you want to add them now</p>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button onClick={() => setShowFigurePrompt(false)} className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-sm">No</button>
+              <button onClick={startFiguresNow} className="px-3 py-2 rounded-xl bg-[#8ea2ff] hover:bg-[#7b90ff] text-black text-sm font-semibold">Yes add figures</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  )
+}
