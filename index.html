@@ -152,22 +152,62 @@ function loadDemo(){
   addSourceFromText('Demo corpus', demo);
 }
 
-function wireUI(){
+async function pullPdfTextAndImages(){
+  const pdfSources = state.sources.filter(s => (s.pages || []).length);
+  if(!pdfSources.length) return;
+  const tTextStart = performance.now();
+  pdfSources.forEach(src => {
+    if(!src.text && src.pages){
+      src.text = src.pages.map(p => `[Page ${p.index}]\n${p.text || ''}`).join('\n\n');
+    }
+  });
+  const textTime = performance.now() - tTextStart;
+  let images = [];
+  pdfSources.forEach(src => {
+    (src.pages || []).forEach(p => {
+      if(p.images) images.push(...p.images);
+    });
+  });
+  if(!images.length){
+    UI.pdfLog.innerHTML = `<div>Extracted text in ${textTime.toFixed(0)} ms. No images found.</div>` + UI.pdfLog.innerHTML;
+    return;
+  }
+  const estimated = images.length * 2000;
+  if(estimated > 30000){
+    const mins = Math.ceil(estimated/60000);
+    if(!confirm(`You have ${images.length} images in your document. Would you like to scan them? Takes ${mins} minutes (estimated time).`)){
+      UI.pdfLog.innerHTML = `<div>Extracted text in ${textTime.toFixed(0)} ms. Skipped ${images.length} images.</div>` + UI.pdfLog.innerHTML;
+      return;
+    }
+  }
+  const imgStart = performance.now();
+  await Promise.all(images.map(processImage));
+  const imgTime = performance.now() - imgStart;
+  UI.pdfLog.innerHTML = `<div>Extracted text in ${textTime.toFixed(0)} ms. Processed ${images.length} images in ${imgTime.toFixed(0)} ms.</div>` + UI.pdfLog.innerHTML;
+}
+
+async function processImage(img){
+  await new Promise(r => setTimeout(r,10));
+}
+
+async function handleAsk(){
+  const q = (UI.q.value || '').trim();
+  await pullPdfTextAndImages();
+  analyze(q);
+}
+
+  function wireUI(){
   initSvg();
   updateAsk();
 
   // Ask button
-  UI.askBtn.addEventListener('click', () => {
-    const q = (UI.q.value || '').trim();
-    analyze(q);
-  });
+  UI.askBtn.addEventListener('click', handleAsk);
 
   // Enter to Ask
   UI.q.addEventListener('keydown', (e) => {
     if(e.key === 'Enter'){
       e.preventDefault();
-      const q = (UI.q.value || '').trim();
-      analyze(q);
+      handleAsk();
     }
   });
 
